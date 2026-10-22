@@ -1,0 +1,7 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "control-brechas-clientes-rm",
+  "main": "./worker/index.ts",
+  "compatibility_date": "2026-10-22",
+  "compatibility_flags": ["nodejs_compat"]
+}
