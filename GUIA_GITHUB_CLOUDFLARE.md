@@ -48,3 +48,5 @@ npm run dev
 ```
 
 El archivo Excel se procesa dentro del navegador. La base cargada por el usuario no queda incluida en GitHub ni almacenada en Cloudflare.
+
+> El comando de compilación usa `vinext build` directamente para evitar problemas de permisos cuando los archivos son cargados mediante la interfaz web de GitHub.
