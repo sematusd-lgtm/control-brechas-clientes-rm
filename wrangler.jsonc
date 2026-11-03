@@ -3,5 +3,12 @@
   "name": "control-brechas-clientes-rm",
   "main": "./worker/index.ts",
   "compatibility_date": "2026-10-22",
-  "compatibility_flags": ["nodejs_compat"]
+  "compatibility_flags": ["nodejs_compat"],
+  // Base publicada para el equipo (resumen comprimido, no el Excel original).
+  "kv_namespaces": [
+    { "binding": "DATA", "id": "6b48e71acaa04d41a70c881d81cfb46c" }
+  ],
+  // ACCESS_TEAM_DOMAIN, ACCESS_AUD y PUBLISHER_EMAILS se configuran en el panel
+  // de Cloudflare (Settings → Variables); keep_vars evita que el despliegue las borre.
+  "keep_vars": true
 }
