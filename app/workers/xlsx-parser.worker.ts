@@ -30,9 +30,10 @@ async function readRows(buffer:ArrayBuffer,onRow:(row:Array<Cell>)=>void){
    return;
   }catch(error){
    if(!(error instanceof StreamUnsupportedError))throw error;
+   self.postMessage({type:"progress",message:`Usando lector alternativo (${error.message})…`});
   }
   // 2) Respaldo: archivos no-ZIP (.xls, .csv) o navegadores sin DecompressionStream.
-  const wb=XLSX.read(buffer,{type:"array",dense:true,cellDates:false,cellFormula:false,cellHTML:false,cellNF:false,cellStyles:false,cellText:false});
+  const wb=XLSX.read(buffer,{type:"array",dense:true,WTF:true,cellDates:false,cellFormula:false,cellHTML:false,cellNF:false,cellStyles:false,cellText:false});
   const sheet=wb.Sheets[wb.SheetNames[0]] as unknown as Sheet;
   if(!Array.isArray(sheet)||!sheet.length)throw new Error("No fue posible leer la primera hoja del archivo.");
   for(const row of sheet)if(row)onRow(row);
