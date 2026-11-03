@@ -1,6 +1,7 @@
 import * as XLSX from "xlsx";
 import executiveData from "../data/executive-map.json";
 import marginData from "../data/margin-map.json";
+import { StreamUnsupportedError, streamXlsxRows } from "./xlsx-stream";
 
 type RecordRow={month:string;week:number;weekKey:string;zone:string;region:string;plant:string;clientCode:string;client:string;workCode:string;work:string;executive:string;margin:number|null;volume:number;loads:number};
 type Quality={month:string;rawRows:number;validRows:number;volume:number;coverage:number;excluded:Record<string,number>};
@@ -19,33 +20,54 @@ function dateValue(v:unknown){if(typeof v==="number"){const x=XLSX.SSF.parse_dat
 function isoWeek(d:Date){const x=new Date(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate()));x.setUTCDate(x.getUTCDate()+4-(x.getUTCDay()||7));const y=new Date(Date.UTC(x.getUTCFullYear(),0,1));return Math.ceil((((+x-+y)/86400000)+1)/7);}
 function geography(plant:string){let p=plant.slice(0,2);if(plant.startsWith("CAL"))p="02";else if(plant.startsWith("MEL"))p="05";else if(plant.startsWith("MAG"))p="12";return{region:regionNames[p]||"Especial / sin región",zone:zoneBy[p]||"Especial"};}
 
-self.onmessage=(event:MessageEvent<{buffer:ArrayBuffer;source:string}>)=>{
+type Sheet=Array<Array<Cell>>;
+
+async function readRows(buffer:ArrayBuffer,onRow:(row:Array<Cell>)=>void){
+  // 1) Lectura por streaming (sin límite de tamaño de texto del navegador).
+  try{
+   let last=-1;
+   await streamXlsxRows(buffer,(cells)=>onRow(cells),(f)=>{const pct=Math.floor(f*100);if(pct!==last&&pct%2===0){last=pct;self.postMessage({type:"progress",message:`Leyendo base ${pct}%`});}});
+   return;
+  }catch(error){
+   if(!(error instanceof StreamUnsupportedError))throw error;
+  }
+  // 2) Respaldo: archivos no-ZIP (.xls, .csv) o navegadores sin DecompressionStream.
+  const wb=XLSX.read(buffer,{type:"array",dense:true,cellDates:false,cellFormula:false,cellHTML:false,cellNF:false,cellStyles:false,cellText:false});
+  const sheet=wb.Sheets[wb.SheetNames[0]] as unknown as Sheet;
+  if(!Array.isArray(sheet)||!sheet.length)throw new Error("No fue posible leer la primera hoja del archivo.");
+  for(const row of sheet)if(row)onRow(row);
+}
+
+self.onmessage=async(event:MessageEvent<{buffer:ArrayBuffer;source:string}>)=>{
  try{
   self.postMessage({type:"progress",message:"Leyendo la estructura del archivo…"});
-  const wb=XLSX.read(event.data.buffer,{type:"array",dense:true,cellDates:false,cellFormula:false,cellHTML:false,cellNF:false,cellStyles:false,cellText:false});
-  const sheet=wb.Sheets[wb.SheetNames[0]] as unknown as Array<Array<Cell>>;
-  if(!Array.isArray(sheet)||!sheet.length)throw new Error("No fue posible leer la primera hoja del archivo.");
-  const headers=new Map<string,number>();
-  sheet[0]?.forEach((cell,i)=>headers.set(txt(cell?.v).toUpperCase(),i));
   const required=["FECHA","DESPACHADO","COD_PROD","UN","COD_CLI","CLIENTE","COD_OBRA","NOM_OBRA"];
-  const missing=required.filter(x=>!headers.has(x));
-  if(missing.length)throw new Error(`Faltan columnas obligatorias: ${missing.join(", ")}.`);
-  const at=(row:Array<Cell>,name:string)=>row[headers.get(name)??-1]?.v;
+  let headers:Map<string,number>|null=null;
+  const at=(row:Array<Cell>,name:string)=>row[headers!.get(name)??-1]?.v;
   const a=new Map<string,RecordRow>(),q=new Map<string,{rawRows:number;validRows:number;volume:number;excluded:Record<string,number>}>(),exclusions:Record<string,number>={},seen=new Set<string>();
   const addEx=(month:string,reason:string)=>{exclusions[reason]=(exclusions[reason]||0)+1;const z=q.get(month);if(z)z.excluded[reason]=(z.excluded[reason]||0)+1;};
-  const total=sheet.length-1;
-  for(let i=1;i<sheet.length;i++){
-   const row=sheet[i];if(!row)continue;const date=dateValue(at(row,"FECHA"));if(!date)continue;
+  let i=0;
+  const handleRow=(row:Array<Cell>)=>{
+   if(!headers){
+    headers=new Map<string,number>();
+    for(let c=0;c<row.length;c++)headers.set(txt(row[c]?.v).toUpperCase(),c);
+    const missing=required.filter(x=>!headers!.has(x));
+    if(missing.length)throw new Error(`Faltan columnas obligatorias: ${missing.join(", ")}.`);
+    return;
+   }
+   i++;
+   const date=dateValue(at(row,"FECHA"));if(!date)return;
    const month=`${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}`,plant=txt(at(row,"LOCAL CMD")||at(row,"CENTRO SAP")).toUpperCase(),volume=num(at(row,"DESPACHADO")),prod=txt(at(row,"COD_PROD")).replace(/\.0$/,"");let reason="";
    const qq=q.get(month)||{rawRows:0,validRows:0,volume:0,excluded:{}};qq.rawRows++;q.set(month,qq);
    if(!Number.isFinite(volume)||volume<=0)reason="Sin volumen / anulado";else if(at(row,"NUL")!==undefined&&at(row,"NUL")!==null&&txt(at(row,"NUL"))!=="")reason="NUL / anulado";else if(txt(at(row,"UN")).toLowerCase()!=="m3")reason="Unidad distinta de m³";else if(txt(at(row,"CONDUCTOR")).toLowerCase().includes("retira planta"))reason="Retira planta";else if(!prod.startsWith("110"))reason="Producto no hormigón";else if(volume<3)reason="Carga menor a 3 m³";else if(Math.abs(Math.round(volume*2)-volume*2)>=1e-8)reason="Volumen fuera de regla 0,5";else if(["13C1","13D1","M13A"].includes(plant))reason="Planta móvil MIX RM";
-   if(reason){addEx(month,reason);continue;}
-   const duplicate=[txt(at(row,"TICKET")),month,plant,prod,volume,txt(at(row,"COD_CLI")),txt(at(row,"COD_OBRA"))].join("¦");if(seen.has(duplicate)){addEx(month,"Duplicado exacto");continue;}seen.add(duplicate);
+   if(reason){addEx(month,reason);return;}
+   const duplicate=[txt(at(row,"TICKET")),month,plant,prod,volume,txt(at(row,"COD_CLI")),txt(at(row,"COD_OBRA"))].join("¦");if(seen.has(duplicate)){addEx(month,"Duplicado exacto");return;}seen.add(duplicate);
    const week=isoWeek(date),geo=geography(plant),clientCode=txt(at(row,"COD_CLI")),client=txt(at(row,"CLIENTE"))||"Cliente sin nombre",workCode=txt(at(row,"COD_OBRA")),work=txt(at(row,"NOM_OBRA"))||"Obra sin nombre",key=[month,week,geo.zone,geo.region,plant,clientCode,client,workCode,work].join("¦"),old=a.get(key);
    qq.validRows++;qq.volume+=volume;if(old){old.volume+=volume;old.loads++;}else a.set(key,{month,week,weekKey:`${date.getFullYear()}-S${String(week).padStart(2,"0")}`,zone:geo.zone,region:geo.region,plant,clientCode,client,workCode,work,executive:"Sin asignar",margin:marginMap[workCode]??null,volume,loads:1});
-   if(i%10000===0)self.postMessage({type:"progress",message:`Procesando ${Math.round(i/total*100)}% · ${i.toLocaleString("es-CL")} filas`});
-  }
-  self.postMessage({type:"progress",message:"Preparando indicadores y filtros…"});
+  };
+  await readRows(event.data.buffer,handleRow);
+  if(!headers)throw new Error("No fue posible leer la primera hoja del archivo.");
+  self.postMessage({type:"progress",message:`Preparando indicadores y filtros… (${i.toLocaleString("es-CL")} filas)`});
   const records=[...a.values()],byClient=new Map<string,string>();
   for(const row of records){const payer=executiveMap.byPayer[normalize(row.client)],work=executiveMap.byWorkCode[row.workCode];if(payer)byClient.set(row.clientCode,payer);else if(!byClient.has(row.clientCode)&&work)byClient.set(row.clientCode,work);}
   for(const row of records)row.executive=byClient.get(row.clientCode)||"Sin asignar";
